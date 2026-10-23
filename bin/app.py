@@ -82,11 +82,31 @@ def tok_key(tok):
     return hashlib.sha256(tok.encode('utf-8')).hexdigest()
 
 
+def atomic_write_json(path, obj, indent=None):
+    """Tulis JSON secara atomik. Di Windows, os.replace bisa gagal sesaat (WinError 5/32) bila
+    antivirus/indexer sedang membuka file tujuan -> ulangi beberapa kali, jangan pernah menggagalkan job."""
+    tmp = '%s.%d.tmp' % (path, threading.get_ident())
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(obj, f, indent=indent)
+        for i in range(25):
+            try:
+                os.replace(tmp, path)
+                return True
+            except PermissionError:
+                time.sleep(0.05 * (i + 1))
+        log('PERINGATAN: gagal menyimpan %s (file sedang dikunci program lain)' % os.path.basename(path))
+    except Exception as e:
+        log('PERINGATAN: gagal menyimpan %s: %s' % (os.path.basename(path), e))
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    return False
+
+
 def save_sessions():
-    tmp = SESSIONS_FILE + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(sessions, f)
-    os.replace(tmp, SESSIONS_FILE)
+    atomic_write_json(SESSIONS_FILE, sessions)
 
 
 def load_sessions():
@@ -100,10 +120,7 @@ def load_sessions():
 
 
 def save_job(j):
-    tmp = os.path.join(JOBS_DIR, j['id'] + '.tmp')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(j, f, indent=1)
-    os.replace(tmp, os.path.join(JOBS_DIR, j['id'] + '.json'))
+    atomic_write_json(os.path.join(JOBS_DIR, j['id'] + '.json'), j, indent=1)
 
 
 def load_jobs():
@@ -423,6 +440,11 @@ def worker_loop():
             run_job(nxt)
         except Exception as e:
             log('worker error: ' + traceback.format_exc())
+            with lock:
+                proc = procs.pop(nxt['id'], None)
+            if proc and proc.poll() is None:      # jangan tinggalkan Blender yatim yang masih memakai GPU
+                subprocess.run(['taskkill', '/PID', str(proc.pid), '/T', '/F'], creationflags=NO_WINDOW,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             with lock:
                 nxt['status'] = 'failed'
                 nxt['error'] = 'Server error: %s' % e
