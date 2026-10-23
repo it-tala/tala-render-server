@@ -1,0 +1,12 @@
+# akun & hash password
+config/
+# junction ke instalasi Blender
+blender
+blender/
+# binary pihak ketiga
+tools/
+# python cache
+__pycache__/
+*.pyc
+# sisa sementara
+*.tmp

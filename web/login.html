@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log in — Tala Render</title>
+<style>
+@font-face{font-family:"Inter";src:url(/static/inter.woff2) format("woff2");font-weight:100 900;font-display:swap}
+:root{--view:#3d3d3d;--surface:#2b2b2b;--head:#303030;--line:#232323;--outline:#1a1a1a;--raised:#545454;--ink:#e6e6e6;--muted:#a0a0a0;
+--orange:#ffa028;--blue:#4772b3;--bad:#ff5a5a;--grid:rgba(0,0,0,.16);--grid-major:rgba(0,0,0,.28)}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;color:var(--ink);font:14px/1.45 Inter,"Segoe UI",-apple-system,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+body{background:
+  linear-gradient(rgba(255,51,82,.32),rgba(255,51,82,.32)) 0 58vh / 100% 1.5px no-repeat,
+  linear-gradient(rgba(139,220,0,.26),rgba(139,220,0,.26)) 64vw 0 / 1.5px 100% no-repeat,
+  linear-gradient(var(--grid-major) 1px,transparent 1px) 0 0/120px 120px,
+  linear-gradient(90deg,var(--grid-major) 1px,transparent 1px) 0 0/120px 120px,
+  linear-gradient(var(--grid) 1px,transparent 1px) 0 0/24px 24px,
+  linear-gradient(90deg,var(--grid) 1px,transparent 1px) 0 0/24px 24px,
+  radial-gradient(ellipse at 50% 35%,#474747 0%,var(--view) 60%,#363636 100%);background-attachment:fixed}
+.wrap{min-height:100%;display:grid;place-items:center;padding:24px}
+.card{width:100%;max-width:380px;background:var(--surface);border:1px solid var(--outline);border-radius:8px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+.card-h{background:var(--head);padding:18px 24px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line)}
+.mark{width:28px;height:28px;border-radius:7px;background:var(--orange);display:grid;place-items:center;color:#1d1d1d;font-weight:800;font-size:15px}
+.brand b{display:block;font-size:15px;letter-spacing:.04em}
+.brand span{color:var(--muted);font-size:12px}
+form{padding:24px}
+label{display:block;font-size:12px;color:var(--muted);margin:0 0 6px;font-weight:500}
+input{width:100%;height:40px;padding:0 12px;border-radius:5px;border:1px solid var(--outline);background:#1d1d1d;color:var(--ink);font:inherit;margin-bottom:16px;transition:border-color .12s}
+input:hover{border-color:#4a4a4a}
+input:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px rgba(71,114,179,.25)}
+button{width:100%;height:42px;border:1px solid #c97a17;border-radius:5px;background:var(--orange);color:#1d1d1d;font:inherit;font-weight:600;cursor:pointer;margin-top:4px;transition:filter .12s}
+button:hover{filter:brightness(1.08)}
+button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.err{background:rgba(229,100,90,.12);color:var(--bad);padding:10px 12px;border-radius:5px;font-size:13px;margin-bottom:16px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="card-h"><div class="mark">T</div><div class="brand"><b>TALA RENDER</b><span>Render server · RTX 5090</span></div></div>
+    <form method="post" action="/login">
+      __ERR__
+      <label for="u">Username</label>
+      <input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" value="__USER__" required autofocus>
+      <label for="p">Password</label>
+      <input id="p" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Log in</button>
+    </form>
+  </div>
+</div>
+</body>
+</html>
