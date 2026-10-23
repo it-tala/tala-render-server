@@ -38,12 +38,15 @@ UPLOADS = os.path.join(DATA, 'uploads')
 OUT_ROOT = os.path.join(ROOT, 'Share', 'Output')
 PORT = 8080
 MAX_UPLOAD = 5 * 1024 ** 3
-SESSION_HOURS = 12
+SESSION_IDLE_DAYS = 90         # sesi hanya habis bila tidak dibuka sama sekali selama 90 hari
+COOKIE_MAX_AGE = 400 * 24 * 3600  # batas maksimum cookie di browser
+SESSIONS_FILE = None             # diisi setelah DATA dibuat
 MAX_FAILS, LOCK_SECS = 5, 300
 NO_WINDOW = 0x08000000
 
 for d in (JOBS_DIR, UPLOADS, OUT_ROOT):
     os.makedirs(d, exist_ok=True)
+SESSIONS_FILE = os.path.join(DATA, 'sessions.json')
 
 
 def log(msg):
@@ -65,13 +68,35 @@ def server_name():
 
 # ======================================================================= state
 lock = threading.RLock()
-sessions = {}           # token -> (user, role, expires)
+sessions = {}           # sha256(token) -> {'user', 'created', 'last'}  (disimpan ke disk, bertahan saat restart)
 fails = {}              # ip -> (count, t0)
 jobs = {}               # id -> job dict
 uploads = {}            # id -> meta
 procs = {}              # job id -> Popen
 stats = {'gpu': None, 'disk': None, 'ok': True, 'updated': 0}
 wake = threading.Event()
+
+
+def tok_key(tok):
+    import hashlib
+    return hashlib.sha256(tok.encode('utf-8')).hexdigest()
+
+
+def save_sessions():
+    tmp = SESSIONS_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(sessions, f)
+    os.replace(tmp, SESSIONS_FILE)
+
+
+def load_sessions():
+    try:
+        with open(SESSIONS_FILE, encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        return
+    cutoff = time.time() - SESSION_IDLE_DAYS * 86400
+    sessions.update({k: v for k, v in data.items() if isinstance(v, dict) and v.get('last', 0) > cutoff})
 
 
 def save_job(j):
@@ -521,12 +546,27 @@ class H(BaseHTTPRequestHandler):
     def session(self):
         c = http.cookies.SimpleCookie(self.headers.get('Cookie', ''))
         tok = c['tr_session'].value if 'tr_session' in c else None
+        if not tok:
+            return None, None
+        key = tok_key(tok)
         with lock:
-            s = sessions.get(tok)
-            if s and s[2] > time.time():
-                return tok, s
-            sessions.pop(tok, None)
-        return None, None
+            s = sessions.get(key)
+            if not s:
+                return None, None
+            now = time.time()
+            if now - s['last'] > SESSION_IDLE_DAYS * 86400:
+                sessions.pop(key, None)
+                save_sessions()
+                return None, None
+            info = users.load()['users'].get(s['user'])
+            if not info:                      # akun dihapus -> sesi tidak berlaku
+                sessions.pop(key, None)
+                save_sessions()
+                return None, None
+            if now - s['last'] > 600:         # catat aktivitas (maks. tiap 10 menit)
+                s['last'] = now
+                save_sessions()
+            return key, (s['user'], info['role'], None)
 
     def read_json(self):
         n = min(int(self.headers.get('Content-Length', 0) or 0), 1024 * 1024)
@@ -577,9 +617,12 @@ class H(BaseHTTPRequestHandler):
         if path == '/login':
             return self.login_page()
         if path == '/logout':
-            tok, _ = self.session()
+            key, s = self.session()
             with lock:
-                sessions.pop(tok, None)
+                if sessions.pop(key, None) is not None:
+                    save_sessions()
+            if s:
+                log('logout %s dari %s' % (s[0], self.client_address[0]))
             return self.redirect('/login', {'Set-Cookie': 'tr_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax'})
         tok, s = self.session()
         if not s:
@@ -713,11 +756,12 @@ class H(BaseHTTPRequestHandler):
         if info and users.verify_password(pw, info['password']):
             tok = secrets.token_urlsafe(32)
             with lock:
-                sessions[tok] = (user, info['role'], time.time() + SESSION_HOURS * 3600)
+                sessions[tok_key(tok)] = {'user': user, 'created': time.time(), 'last': time.time(), 'ip': ip}
                 fails.pop(ip, None)
+                save_sessions()
             log('login OK %s dari %s' % (user, ip))
             return self.redirect('/', {'Set-Cookie': 'tr_session=%s; Max-Age=%d; Path=/; HttpOnly; SameSite=Lax'
-                                       % (tok, SESSION_HOURS * 3600)})
+                                       % (tok, COOKIE_MAX_AGE)})
         with lock:
             n, t0 = fails.get(ip, (0, time.time()))
             fails[ip] = (n + 1, t0)
@@ -881,6 +925,8 @@ class H(BaseHTTPRequestHandler):
 
 def main():
     load_jobs()
+    load_sessions()
+    log('%d sesi login dipulihkan' % len(sessions))
     for fn in (stats_loop, worker_loop, cleanup_loop):
         threading.Thread(target=fn, daemon=True).start()
     srv = ThreadingHTTPServer(('0.0.0.0', PORT), H)
