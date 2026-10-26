@@ -62,8 +62,11 @@ def safe_name(name, fallback='render'):
     return (s or fallback)[:80]
 
 
+SERVER_HOST = '192.168.110.152'   # IP statis LAN; dipakai untuk alamat folder share (lebih andal dari nama PC)
+
+
 def server_name():
-    return os.environ.get('COMPUTERNAME', 'TALA-SERVER').upper()
+    return SERVER_HOST
 
 
 # ======================================================================= state
