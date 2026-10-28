@@ -680,7 +680,8 @@ class H(BaseHTTPRequestHandler):
             return self.json(d)
         m = re.fullmatch(r'/thumbs/([a-f0-9]{12})/([^/]+)', path)
         if m:
-            return self.send_file(os.path.join(JOBS_DIR, m.group(1) + '_thumbs', os.path.basename(m.group(2))))
+            name = os.path.basename(urllib.parse.unquote(m.group(2)))   # nama kamera bisa berisi spasi
+            return self.send_file(os.path.join(JOBS_DIR, m.group(1) + '_thumbs', name))
         m = re.fullmatch(r'/files/([a-f0-9]{12})/(.+)', path)
         if m:
             with lock:
