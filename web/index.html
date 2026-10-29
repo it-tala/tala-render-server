@@ -171,6 +171,10 @@ tr.mine td:first-child{box-shadow:inset 2px 0 0 var(--blue)}
 .guide ol{margin:8px 0 0;padding-left:18px;color:var(--ink-2);line-height:1.7}
 @media (max-width:760px){.guide{grid-template-columns:1fr}}
 
+.bitem{border-top:1px solid var(--line)}.bitem:first-child{border-top:0}
+.bitem .file .g .bar{height:5px}
+tr.bhead td{background:#262a31;border-top:1px solid var(--line)}
+tr.inb td:first-child{border-left:3px solid var(--blue);padding-left:13px}
 .cfg{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:22px;align-items:start}
 .file{display:flex;align-items:center;gap:14px;padding:14px}
 .file .ic{width:40px;height:40px;border-radius:var(--r-sm);background:var(--raised);display:grid;place-items:center;font-family:var(--mono);font-size:10px;color:var(--orange-hi)}
@@ -394,12 +398,14 @@ let NF=null;   // state form render baru
 function steps(n){ const L=['Upload file','Set up render','Queued'];
   return `<div class="steps">${L.map((t,i)=>`<span class="${i+1<n?'done':i+1===n?'cur':''}"><i>${i+1<n?'✓':i+1}</i>${t}</span>`).join('')}</div>`; }
 function viewNew(){
+  if(BT&&!BT.done){ viewBatch(); return; }
   NF=null;
   app.innerHTML = `<h1>New render</h1>${steps(1)}
     <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose a .blend or .zip file">
-      <b>Drop a file here, or click to browse</b>
-      <span class="sub">.blend — or a .zip containing the .blend and its textures · max 5 GB</span>
-      <input type="file" id="pick" accept=".blend,.zip" hidden>
+      <b>Drop files here, or click to browse</b>
+      <span class="sub">One or more .blend files — or .zip files containing the .blend and its textures · max 5 GB each</span>
+      <span class="sub" style="display:block;margin-top:6px">Select several files at once to render them as one batch</span>
+      <input type="file" id="pick" accept=".blend,.zip" multiple hidden>
     </div>
     <section class="panel" style="margin-top:18px"><div class="ph"><span>Before you upload — make sure textures &amp; assets come along</span></div>
       <div class="guide">
@@ -417,11 +423,12 @@ function viewNew(){
   const drop=$('#drop'), pick=$('#pick');
   drop.onclick=()=>pick.click();
   drop.onkeydown=e=>{ if(e.key==='Enter'||e.key===' '){e.preventDefault();pick.click()} };
-  pick.onchange=()=>pick.files[0]&&startUpload(pick.files[0]);
+  pick.onchange=()=>pickFiles([...pick.files]);
   ['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over')}));
   ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over');
-    if(ev==='drop'&&e.dataTransfer.files[0]) startUpload(e.dataTransfer.files[0]);}));
+    if(ev==='drop'&&e.dataTransfer.files.length) pickFiles([...e.dataTransfer.files]);}));
 }
+function pickFiles(files){ if(!files.length) return; if(files.length===1) startUpload(files[0]); else startBatch(files); }
 function upHtml(file){
   return `<h1>New render</h1>${steps(1)}<section class="panel"><div class="up">
     <div class="row"><span class="fname">${esc(file.name)}</span><span class="pct" id="upPct">0%</span></div>
@@ -472,6 +479,223 @@ async function analyse(up){
     clearInterval(tick); viewConfig(info);
   }catch(err){ clearInterval(tick); $('#upBar').parentElement.className='bar'; uploadFail(err.message); }
 }
+
+/* ================= BATCH (banyak file sekaligus) ================= */
+let BT=null;
+const MAX_BATCH=30;
+function hex12(){ const b=new Uint8Array(6); crypto.getRandomValues(b); return [...b].map(x=>x.toString(16).padStart(2,'0')).join(''); }
+function okFile(f){ return /\.(blend|zip)$/i.test(f.name) && f.size>0 && f.size<=5*1024**3; }
+function startBatch(files){ addBatchFiles(files, true); }
+function addBatchFiles(files, fresh){
+  const good=files.filter(okFile), bad=files.length-good.length;
+  if(fresh||!BT) BT={id:hex12(), items:[], seq:0, mode:'image', camSel:'all', res:'file', samples:'file', sampleCustom:128,
+    format:'file', video:true, ackMissing:false, name:'', xhr:null, samples_:[], speed:null, submitting:false, done:false};
+  const room=MAX_BATCH-BT.items.length; const take=good.slice(0,Math.max(0,room));
+  if(bad) toast(`${bad} file${bad>1?'s':''} skipped — only .blend or .zip up to 5 GB`);
+  else if(good.length>take.length) toast(`Maximum ${MAX_BATCH} files per batch`);
+  take.forEach(f=>BT.items.push({k:BT.seq++, file:f, st:'wait', loaded:0, up:null, info:null, err:null, cams:new Set(), open:false}));
+  if(!BT.items.length){ BT=null; return; }
+  if(location.hash!=='#/new') location.hash='#/new'; else viewBatch();
+  pumpUpload();
+}
+function defaultCams(info){
+  const vis=info.cameras.filter(c=>!c.hide_render);
+  if(BT.camSel==='active'){ const a=info.cameras.find(c=>c.active); return new Set(a?[a.name]:vis.slice(0,1).map(c=>c.name)); }
+  return new Set(vis.map(c=>c.name));
+}
+function pumpUpload(){
+  if(!BT||BT.xhr) return;
+  const it=BT.items.find(x=>x.st==='wait'); if(!it){ updBatchTop(); return; }
+  it.st='up'; drawBItems();
+  const xhr=new XMLHttpRequest(); BT.xhr=xhr; BT.samples_=[];
+  xhr.open('PUT','/api/upload'); xhr.setRequestHeader('X-Filename',encodeURIComponent(it.file.name));
+  xhr.upload.onprogress=e=>{ if(!e.lengthComputable) return; it.loaded=e.loaded;
+    const now=performance.now(); const s=BT.samples_; s.push([now,e.loaded]); while(s.length>1&&now-s[0][0]>4000) s.shift();
+    const dt=(now-s[0][0])/1000; if(dt>0.3) BT.speed=(e.loaded-s[0][1])/dt;
+    const pct=100*e.loaded/e.total, row=$('#bi'+it.k);
+    if(row){ row.querySelector('.bpct').textContent=pct.toFixed(0)+'%'; row.querySelector('.bar i').style.width=pct+'%'; }
+    updBatchTop(); };
+  xhr.onload=()=>{ BT.xhr=null; let d={}; try{d=JSON.parse(xhr.responseText)}catch{}
+    if(xhr.status===401){ location.href='/login'; return; }
+    if(xhr.status!==200){ it.st='error'; it.err=d.error||('Upload failed ('+xhr.status+')'); }
+    else { it.loaded=it.file.size; it.up=d; it.st='an'; analyseItem(it); }
+    drawBItems(); pumpUpload(); };
+  xhr.onerror=()=>{ BT.xhr=null; it.st='error'; it.err='Connection to the server was lost during upload.'; drawBItems(); pumpUpload(); };
+  xhr.onabort=()=>{ if(BT) BT.xhr=null; };
+  xhr.send(it.file);
+}
+async function analyseItem(it){
+  it.t0=Date.now();
+  try{ const info=await api('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:it.up.id})});
+    if(!BT||!BT.items.includes(it)) return;
+    it.info=info; it.cams=defaultCams(info); it.st='ready';
+  }catch(err){ if(!BT||!BT.items.includes(it)) return; it.st='error'; it.err=err.message; }
+  drawBItems(); drawBForm(); drawBSum();
+}
+function removeItem(k){
+  const it=BT.items.find(x=>x.k===k); if(!it) return;
+  if(it.st==='up'&&BT.xhr){ BT.xhr.abort(); BT.xhr=null; }
+  if(it.up) fetch(`/api/uploads/${it.up.id}/discard`,{method:'POST'});
+  BT.items=BT.items.filter(x=>x!==it);
+  if(!BT.items.length){ BT=null; viewNew(); return; }
+  drawBItems(); drawBForm(); drawBSum(); pumpUpload();
+}
+function cancelBatch(){
+  if(!BT) return; if(!confirm('Cancel this batch and discard all uploaded files?')) return;
+  if(BT.xhr) BT.xhr.abort();
+  BT.items.forEach(it=>{ if(it.up&&it.st!=='queued') fetch(`/api/uploads/${it.up.id}/discard`,{method:'POST'}); });
+  BT=null; viewNew();
+}
+window.addEventListener('beforeunload',e=>{ if(BT&&!BT.done&&BT.items.some(x=>['wait','up','an','ready'].includes(x.st))){ e.preventDefault(); e.returnValue=''; } });
+function viewBatch(){
+  NF=null;
+  app.innerHTML=`<h1>New render · batch</h1>${steps(BT.items.every(x=>!['wait','up','an'].includes(x.st))?2:1)}
+    <section class="panel" id="btop"></section>
+    <div class="cfg" style="margin-top:18px">
+      <div style="min-width:0;display:flex;flex-direction:column;gap:18px">
+        <section class="panel"><div class="ph"><span>Files</span><span style="display:flex;gap:8px">
+          <button class="btn ghost sm" id="bAdd">+ Add files</button><button class="btn ghost sm danger" id="bCancel">Cancel batch</button></span></div>
+          <input type="file" id="bPick" accept=".blend,.zip" multiple hidden><div id="blist"></div></section>
+        <section class="panel" id="bform"></section>
+      </div>
+      <aside class="panel sum"><div class="ph"><span>Summary</span></div><div class="pb" id="sum"></div></aside></div>`;
+  $('#bAdd').onclick=()=>$('#bPick').click();
+  $('#bPick').onchange=e=>{ addBatchFiles([...e.target.files], false); e.target.value=''; };
+  $('#bCancel').onclick=cancelBatch;
+  updBatchTop(); drawBItems(); drawBForm(); drawBSum();
+}
+function updBatchTop(){
+  const el=$('#btop'); if(!el||!BT) return;
+  const tot=BT.items.reduce((s,x)=>s+x.file.size,0), done=BT.items.reduce((s,x)=>s+(x.st==='error'&&!x.up?0:x.loaded),0);
+  const nUp=BT.items.filter(x=>x.up).length, n=BT.items.length, nAn=BT.items.filter(x=>x.st==='an').length;
+  const uploading=BT.items.some(x=>x.st==='wait'||x.st==='up');
+  const pct=tot?100*done/tot:0, left=BT.speed&&uploading?(tot-done)/BT.speed:null;
+  el.innerHTML=`<div class="up" style="padding:20px 22px">
+    <div class="row"><span class="fname">${uploading?`Uploading ${Math.min(nUp+1,n)} of ${n} files`:nAn?`Reading ${nAn} file${nAn>1?'s':''}…`:`${n} file${n>1?'s':''} uploaded`}</span><span class="pct">${pct.toFixed(0)}%</span></div>
+    <div class="bar"><i style="width:${pct}%"></i></div>
+    <div class="facts"><span><b>${fmtBytes(done)}</b> of ${fmtBytes(tot)}</span>${uploading?`<span>Speed <b>${BT.speed?fmtBytes(BT.speed)+'/s':'—'}</b></span><span>Time left <b>${left!=null?fmtDur(left):'calculating…'}</b></span>`:''}
+      <span>Files upload one after another — keep this tab open until all are uploaded.</span></div></div>`;
+}
+function bStatus(it){
+  if(it.st==='wait') return '<span class="sub">Waiting</span>';
+  if(it.st==='up') return '<span class="bpct tnum" style="font-weight:600">0%</span>';
+  if(it.st==='an') return '<span class="sub">Reading file…</span>';
+  if(it.st==='error') return '<span class="badge b-bad">Failed</span>';
+  if(it.st==='queued') return '<span class="badge b-ok">Queued</span>';
+  return (it.info.missing||[]).length?'<span class="badge b-q" style="color:#f6b874">Missing textures</span>':'<span class="badge b-ok">Ready</span>';
+}
+function drawBItems(){
+  const el=$('#blist'); if(!el||!BT) return;
+  el.innerHTML=BT.items.map(it=>{ const i=it.info; const vis=i?i.cameras:[];
+    const meta=i?`${fmtBytes(it.file.size)} · ${i.engine==='CYCLES'?'Cycles':esc(i.engine.replace('BLENDER_','').replace('_',' '))} · ${i.out_x}×${i.out_y} · ${i.cameras.length} camera${i.cameras.length!==1?'s':''}${BT.mode==='anim'?` · frames ${i.frame_start}–${i.frame_end}`:''}`:fmtBytes(it.file.size);
+    return `<div class="bitem" id="bi${it.k}">
+      <div class="file" style="padding:12px 14px"><div class="ic">${it.file.name.toLowerCase().endsWith('.zip')?'.zip':'.blend'}</div>
+        <div class="g"><div class="n">${esc(it.file.name)}</div><div class="fine">${meta}</div>
+          ${it.st==='up'?`<div class="bar thin" style="margin-top:8px"><i style="width:${100*it.loaded/it.file.size}%"></i></div>`:''}
+          ${it.st==='an'?`<div class="bar thin indet" style="margin-top:8px"><i></i></div>`:''}</div>
+        ${bStatus(it)}
+        ${it.st==='ready'&&vis.length?`<button class="btn ghost sm" data-open="${it.k}" aria-expanded="${it.open}">Cameras ${it.cams.size}/${vis.length} ${it.open?'▴':'▾'}</button>`:''}
+        ${it.st!=='queued'?`<button class="btn ghost sm" data-rm="${it.k}" title="Remove from batch" aria-label="Remove ${esc(it.file.name)}">✕</button>`:''}</div>
+      ${it.st==='error'?`<div class="errbox" style="margin:0 14px 12px">${esc(it.err)}</div>`:''}
+      ${it.st==='ready'&&!vis.length?`<div class="errbox" style="margin:0 14px 12px">This file has no cameras — it will be skipped.</div>`:''}
+      ${it.st==='ready'&&(i.missing||[]).length?`<div class="warnbox" style="margin:0 14px 12px"><b>${i.missing.length} file${i.missing.length>1?'s':''} missing:</b> <span class="mono">${i.missing.slice(0,6).map(esc).join(', ')}${i.missing.length>6?' …':''}</span></div>`:''}
+      ${it.st==='ready'&&it.open?`<div class="cams" style="margin:0 14px 14px">${vis.map(c=>`<label class="cam ${it.cams.has(c.name)?'sel':''}"><input type="checkbox" data-bc="${it.k}" data-cam="${esc(c.name)}" ${it.cams.has(c.name)?'checked':''}>
+          <span class="cn">${esc(c.name)}</span>${c.active?'<span class="badge b-run" style="height:20px">active</span>':''}${c.hide_render?'<span class="badge b-mute" style="height:20px">render disabled in Blender</span>':''}</label>`).join('')}</div>`:''}
+    </div>`; }).join('');
+  el.querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>removeItem(+b.dataset.rm));
+  el.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>{ const it=BT.items.find(x=>x.k===+b.dataset.open); it.open=!it.open; drawBItems(); });
+  el.querySelectorAll('[data-bc]').forEach(c=>c.onchange=()=>{ const it=BT.items.find(x=>x.k===+c.dataset.bc);
+    c.checked?it.cams.add(c.dataset.cam):it.cams.delete(c.dataset.cam); drawBItems(); drawBSum(); });
+  updBatchTop();
+  const st=document.querySelector('.steps'); if(st) st.outerHTML=steps(BT.items.every(x=>!['wait','up','an'].includes(x.st))?2:1);
+}
+function drawBForm(){
+  const el=$('#bform'); if(!el||!BT) return;
+  el.innerHTML=`<div class="ph"><span>Settings for all files</span></div>
+    <div class="sec" style="border-top:0"><div class="sec-h"><span class="t">What do you want to render?</span></div>
+      <div class="seg" role="group" aria-label="Mode">
+        <button data-mode="image" aria-pressed="${BT.mode==='image'}">Image<small>one image per camera</small></button>
+        <button data-mode="anim" aria-pressed="${BT.mode==='anim'}">Animation<small>each file's frame range + a video per camera</small></button>
+      </div>
+      <label class="toggle" style="margin-top:12px" ${BT.mode==='anim'?'':'hidden'}><input type="checkbox" id="bvid" ${BT.video?'checked':''}> Create MP4 video per camera</label></div>
+    <div class="sec"><div class="sec-h"><span class="t">Cameras</span><span class="from">change per file with the “Cameras” button</span></div>
+      <div class="seg" role="group" aria-label="Cameras">
+        <button data-cs="all" aria-pressed="${BT.camSel==='all'}">All cameras<small>every camera enabled for render</small></button>
+        <button data-cs="active" aria-pressed="${BT.camSel==='active'}">Active camera only<small>one image per file</small></button>
+      </div></div>
+    <div class="sec"><div class="sec-h"><span class="t">Resolution</span><span class="from">aspect ratio follows each file</span></div>
+      <div class="chips">${RES.map(([k,l,w])=>`<button class="chip" data-res="${k}" aria-pressed="${BT.res===k}">${l}<small>${w?w+' px wide':'each file’s own'}</small></button>`).join('')}</div></div>
+    <div class="sec"><details class="adv" ${BT.samples!=='file'||BT.format!=='file'?'open':''}><summary>Advanced settings</summary><div class="inner">
+      <div class="grid2"><div class="field"><label for="bsmp">Quality (samples)</label>
+        <select id="bsmp" class="input"><option value="file">From each file</option><option value="64">Draft — 64 samples, quick check</option><option value="custom">Custom…</option></select></div>
+        <div class="field" id="bsmpCF" ${BT.samples==='custom'?'':'hidden'}><label for="bsmpC">Samples</label><input id="bsmpC" class="input tnum" type="number" min="1" max="65536" value="${BT.sampleCustom}"></div></div>
+      <div class="grid2"><div class="field"><label for="bfmt">Image format</label>
+        <select id="bfmt" class="input"><option value="file">From each file</option><option value="PNG">PNG — full quality</option><option value="JPEG">JPG — small files</option></select></div>
+        <div class="field"><label for="bname">Batch name <span class="sub">(optional)</span></label><input id="bname" class="input" maxlength="60" placeholder="e.g. Doheny collection" value="${esc(BT.name)}"></div></div>
+    </div></details></div>`;
+  $('#bsmp').value=BT.samples; $('#bfmt').value=BT.format;
+  el.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{BT.mode=b.dataset.mode;drawBForm();drawBItems();drawBSum()});
+  el.querySelectorAll('[data-cs]').forEach(b=>b.onclick=()=>{BT.camSel=b.dataset.cs;
+    BT.items.forEach(it=>{ if(it.info) it.cams=defaultCams(it.info); }); drawBForm();drawBItems();drawBSum()});
+  el.querySelectorAll('[data-res]').forEach(b=>b.onclick=()=>{BT.res=b.dataset.res;drawBForm();drawBSum()});
+  const v=$('#bvid'); if(v) v.onchange=()=>{BT.video=v.checked;drawBSum()};
+  $('#bsmp').onchange=e=>{BT.samples=e.target.value;$('#bsmpCF').hidden=BT.samples!=='custom';drawBSum()};
+  $('#bsmpC').oninput=e=>{BT.sampleCustom=+e.target.value;drawBSum()};
+  $('#bfmt').onchange=e=>{BT.format=e.target.value;drawBSum()};
+  $('#bname').oninput=e=>{BT.name=e.target.value};
+}
+function bPlan(){
+  const ready=BT.items.filter(x=>x.st==='ready'&&x.cams.size);
+  const busy=BT.items.filter(x=>['wait','up','an'].includes(x.st)).length;
+  const failed=BT.items.filter(x=>x.st==='error'||(x.st==='ready'&&!x.cams.size)).length;
+  const miss=ready.filter(x=>(x.info.missing||[]).length).length;
+  let units=0, cams=0; ready.forEach(x=>{ cams+=x.cams.size; units+=BT.mode==='anim'?x.cams.size*Math.max(1,x.info.frame_end-x.info.frame_start+1):x.cams.size; });
+  return {ready, busy, failed, miss, units, cams};
+}
+function drawBSum(){
+  const el=$('#sum'); if(!el||!BT) return;
+  const P=bPlan(); let err=null;
+  if(P.busy) err=`Waiting for ${P.busy} file${P.busy>1?'s':''} to finish uploading / reading…`;
+  else if(!P.ready.length) err='No file is ready to render.';
+  else if(P.miss&&!BT.ackMissing) err=`${P.miss} file${P.miss>1?'s have':' has'} missing textures — remove ${P.miss>1?'them':'it'}, or tick “Render anyway”.`;
+  const samples=BT.samples==='file'?'from each file':BT.samples==='custom'?BT.sampleCustom+' samples':BT.samples+' samples';
+  el.innerHTML=`
+    <div><div class="big">${P.ready.length} file${P.ready.length!==1?'s':''}</div>
+      <div class="sub">${BT.mode==='anim'?`${P.units} frames · ${P.cams} camera${P.cams!==1?'s':''}${BT.video?' · '+P.cams+' MP4 video'+(P.cams!==1?'s':''):''}`:`${P.units} image${P.units!==1?'s':''} in total`}</div></div>
+    <dl class="kv">
+      <dt>Resolution</dt><dd>${({file:'From each file',fhd:'Full HD','2k':'2K','4k':'4K','8k':'8K'})[BT.res]}</dd>
+      <dt>Quality</dt><dd>${samples}</dd>
+      <dt>Format</dt><dd>${BT.format==='file'?'from each file':BT.format==='JPEG'?'JPG':'PNG'}</dd>
+      <dt>Render</dt><dd>One file after another · GPU RTX 5090</dd>
+      ${P.failed?`<dt>Skipped</dt><dd style="color:#f3a49d">${P.failed} file${P.failed>1?'s':''}</dd>`:''}
+    </dl>
+    ${P.miss?`<label class="toggle"><input type="checkbox" id="bAck" ${BT.ackMissing?'checked':''}> Render anyway without missing textures</label>`:''}
+    <div class="note">Each file becomes its own job in the queue and renders one after another. Results go to a separate folder per file, and the whole batch can be downloaded as one .zip from History.</div>
+    ${err?`<div class="${P.busy?'note':'errbox'}">${err}</div>`:''}
+    <button class="btn primary lg" id="go" ${err||BT.submitting?'disabled':''}>${BT.submitting?'Submitting…':P.busy?'Waiting for uploads…':`Add ${P.ready.length} file${P.ready.length!==1?'s':''} to queue`}</button>
+    <div class="fine">Results are saved in your account folder:<div class="path" style="margin-top:6px">${esc(`\\\\${TR.server}\\Render\\Output\\${TR.user}\\<file name>_…`)}</div></div>`;
+  const ack=$('#bAck'); if(ack) ack.onchange=()=>{BT.ackMissing=ack.checked;drawBSum()};
+  $('#go').onclick=submitBatch;
+}
+async function submitBatch(){
+  const P=bPlan(); if(!P.ready.length||BT.submitting) return;
+  BT.submitting=true; drawBSum();
+  const name=(BT.name||'').trim()||`${P.ready.length} files · ${new Date().toLocaleDateString('en-GB',{day:'numeric',month:'short'})} ${new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}`;
+  let ok=0;
+  for(const it of P.ready){
+    const i=it.info;
+    const body={upload_id:it.up.id, mode:BT.mode, cameras:[...it.cams], res:BT.res, format:BT.format,
+      samples: BT.samples==='file'?null:BT.samples==='custom'?BT.sampleCustom:+BT.samples,
+      frame_start:i.frame_start, frame_end:i.frame_end, video:BT.video, batch:BT.id, batch_name:name, batch_n:P.ready.length};
+    try{ await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); it.st='queued'; ok++; }
+    catch(err){ it.st='error'; it.err=err.message; }
+    drawBItems();
+  }
+  BT.submitting=false;
+  if(ok===P.ready.length){ BT.done=true; BT=null; toast(`${ok} file${ok>1?'s':''} added to the queue`); location.hash='#/'; }
+  else { toast(`${ok} of ${P.ready.length} added — check the failed files`); drawBSum(); }
+}
+
 const RES=[['file','From file'],['fhd','Full HD',1920],['2k','2K',2560],['4k','4K',3840],['8k','8K',7680]];
 function dims(info,key){ let w=info.out_x,h=info.out_y; const t=(RES.find(r=>r[0]===key)||[])[2];
   if(t){ const k=t/Math.max(w,h); w=w*k; h=h*k; } return [Math.max(4,Math.round(w/2)*2),Math.max(4,Math.round(h/2)*2)]; }
@@ -609,6 +833,7 @@ async function viewJob(id){
         ${dur!=null&&j.status==='done'?`<span class="tnum">${fmtClock(j.started)}–${fmtClock(j.finished)} · ${fmtDur(dur)}</span>`:`<span>submitted ${fmtDate(j.created)}</span>`}</div></div>
         <div class="acts" style="margin:0">${j.can_cancel?`<button class="btn ghost danger" data-cancel="${j.id}">Cancel</button>`:''}
           ${res.length?`<a class="btn primary" href="/files/${j.id}/_semua.zip">Download all (.zip · ${fmtBytes(j.out_size)})</a>`:''}</div></div>
+      ${j.batch?`<div class="note" style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><span>Part of batch <b>${esc(j.batch_name||'')}</b>${j.batch_n>1?` · ${j.batch_n} files`:''}</span><a class="btn sm" href="/batch/${j.batch}.zip">Download whole batch (.zip)</a></div>`:''}
       ${j.status==='failed'?`<div class="errbox" style="margin-top:16px"><b>Render failed.</b> ${esc(j.error||'')}</div>`:''}
       ${j.note?`<div class="note" style="margin-top:16px">${esc(j.note)}</div>`:''}
       ${(j.missing||[]).length?`<div class="warnbox" style="margin-top:16px"><b>Rendered with ${j.missing.length} missing file${j.missing.length>1?'s':''}:</b> <span class="mono">${j.missing.slice(0,8).map(esc).join(', ')}${j.missing.length>8?' …':''}</span></div>`:''}
@@ -645,7 +870,7 @@ async function viewHistory(){
   app.querySelectorAll('[data-sc]').forEach(b=>b.onclick=()=>{histScope=b.dataset.sc;viewHistory()});
   const {jobs}=await api('/api/jobs?scope='+histScope);
   $('#hist').innerHTML = jobs.length ? `<table><thead><tr><th>Job</th><th class="hide-sm">Content</th><th class="hide-sm">Output</th><th>Status</th><th class="r hide-sm">Duration</th></tr></thead><tbody>
-    ${jobs.map(j=>`<tr class="link" data-href="#/job/${j.id}"><td><div class="jn">${esc(j.title)}</div><div class="js">${esc(j.user)} · ${fmtDate(j.created)}</div></td>
+    ${jobs.map((j,ix)=>`${j.batch&&(ix===0||jobs[ix-1].batch!==j.batch)?`<tr class="bhead"><td colspan="5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><span><span class="badge b-run" style="height:20px">Batch</span> <b>${esc(j.batch_name||'')}</b> <span class="sub">· ${jobs.filter(x=>x.batch===j.batch).length} file${jobs.filter(x=>x.batch===j.batch).length>1?'s':''} · ${esc(j.user)}</span></span><a class="btn sm" href="/batch/${j.batch}.zip">Download batch (.zip)</a></div></td></tr>`:''}<tr class="link${j.batch?' inb':''}" data-href="#/job/${j.id}"><td><div class="jn">${esc(j.title)}</div><div class="js">${esc(j.user)} · ${fmtDate(j.created)}</div></td>
       <td class="hide-sm">${content(j)}</td><td class="hide-sm tnum">${j.n_results?fmtBytes(j.out_size):'—'}</td><td>${badge(j.status)}</td>
       <td class="r tnum hide-sm sub">${j.status==='done'?fmtDur(between(j.started,j.finished)):j.status==='failed'?esc((j.error||'').slice(0,40)):'—'}</td></tr>`).join('')}
     </tbody></table>` : `<div class="empty"><b>No renders yet</b><div class="sub">Renders you submit will appear here.</div></div>`;

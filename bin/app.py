@@ -178,7 +178,15 @@ def stats_loop():
 
 
 # ======================================================================= analyse
+analyse_sem = threading.Semaphore(2)   # maks 2 Blender pembaca file sekaligus (upload batch)
+
+
 def analyse(blend, search_root):
+    with analyse_sem:
+        return _analyse(blend, search_root)
+
+
+def _analyse(blend, search_root):
     p = subprocess.run([BLENDER, '-b', '--factory-startup', '--disable-autoexec', blend,
                         '--python', os.path.join(BIN, 'inspect_blend.py')],
                        capture_output=True, text=True, timeout=600, errors='replace', creationflags=NO_WINDOW,
@@ -494,7 +502,7 @@ def eta_info(j):
 def job_public(j, full=False):
     keys = ['id', 'user', 'title', 'created', 'started', 'finished', 'status', 'mode', 'cameras', 'res',
             'out_w', 'out_h', 'engine', 'samples_eff', 'frame', 'frame_start', 'frame_end', 'error', 'note',
-            'src_name', 'format', 'video', 'missing']
+            'src_name', 'format', 'video', 'missing', 'batch', 'batch_name', 'batch_n']
     d = {k: j.get(k) for k in keys}
     p = j['progress']
     d['progress'] = {k: p.get(k) for k in ('unit_done', 'unit_total', 'cam', 'cam_i', 'frame', 'sample',
@@ -682,6 +690,13 @@ class H(BaseHTTPRequestHandler):
         if m:
             name = os.path.basename(urllib.parse.unquote(m.group(2)))   # nama kamera bisa berisi spasi
             return self.send_file(os.path.join(JOBS_DIR, m.group(1) + '_thumbs', name))
+        m = re.fullmatch(r'/batch/([a-f0-9]{12})\.zip', path)
+        if m:
+            with lock:
+                lst = sorted((x for x in jobs.values() if x.get('batch') == m.group(1)), key=lambda x: x['created'])
+            if not lst:
+                return self.send(404, 'Not found')
+            return self.send_zip(lst, '%s_%s.zip' % (safe_name(lst[0].get('batch_name') or 'batch'), m.group(1)[:6]))
         m = re.fullmatch(r'/files/([a-f0-9]{12})/(.+)', path)
         if m:
             with lock:
@@ -690,7 +705,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send(404, 'Not found')
             rel = urllib.parse.unquote(m.group(2))
             if rel == '_semua.zip':
-                return self.send_zip(j)
+                return self.send_zip([j], os.path.basename(j['out_dir']) + '.zip')
             full = os.path.normpath(os.path.join(j['out_dir'], rel))
             if not full.startswith(os.path.normpath(j['out_dir']) + os.sep):
                 return self.send(403, 'Forbidden')
@@ -698,8 +713,8 @@ class H(BaseHTTPRequestHandler):
             return self.send_file(full, download_name=os.path.basename(full) if dl else None)
         self.send(404, 'Not found')
 
-    def send_zip(self, j):
-        name = os.path.basename(j['out_dir']) + '.zip'
+    def send_zip(self, jl, name):
+        many = len(jl) > 1
         self.send_response(200)
         self.send_header('Content-Type', 'application/zip')
         self.send_header('Content-Disposition', "attachment; filename*=UTF-8''%s" % urllib.parse.quote(name))
@@ -723,10 +738,14 @@ class H(BaseHTTPRequestHandler):
                 s.f.flush()
 
         with zipfile.ZipFile(W(self.wfile), 'w', zipfile.ZIP_STORED, allowZip64=True) as z:
-            for root, _, files in os.walk(j['out_dir']):
-                for fn in sorted(files):
-                    full = os.path.join(root, fn)
-                    z.write(full, os.path.relpath(full, j['out_dir']))
+            for j in jl:
+                if not os.path.isdir(j['out_dir']):
+                    continue
+                base = os.path.dirname(j['out_dir']) if many else j['out_dir']
+                for root, _, files in os.walk(j['out_dir']):
+                    for fn in sorted(files):
+                        full = os.path.join(root, fn)
+                        z.write(full, os.path.relpath(full, base))
 
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
@@ -917,13 +936,22 @@ class H(BaseHTTPRequestHandler):
              'frame_end': fe, 'fps': info['fps'], 'cam_frames': cam_frames, 'video': bool(b.get('video', True)), 'blend': blend,
              'out_dir': out, 'results': [], 'log': [], 'engine': info['engine'],
              'out_w': None, 'out_h': None, 'samples_eff': samples or info['samples']}
+        bid = str(b.get('batch') or '')
+        if re.fullmatch(r'[a-f0-9]{12}', bid):
+            j['batch'] = bid
+            j['batch_name'] = str(b.get('batch_name') or '')[:80]
+            try:
+                j['batch_n'] = max(1, min(500, int(b.get('batch_n') or 1)))
+            except (TypeError, ValueError):
+                j['batch_n'] = 1
         j['progress'] = new_progress(j)
         with lock:
             uploads.pop(up['id'], None)
             jobs[jid] = j
             save_job(j)
         wake.set()
-        log('new job %s %s by %s (%s, %d cameras)' % (jid, title, user, mode, len(cams)))
+        log('new job %s %s by %s (%s, %d cameras%s)' % (jid, title, user, mode, len(cams),
+                                                         ', batch ' + j['batch'] if j.get('batch') else ''))
         self.json({'id': jid})
 
     def api_cancel(self, jid, user, role):
