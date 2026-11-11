@@ -93,7 +93,7 @@ def cam_start(i):
     else:
         fdir = os.path.join(job['out_dir'], safe, 'frames')
         os.makedirs(fdir, exist_ok=True)
-        r.filepath = os.path.join(fdir, '')
+        r.filepath = os.path.join(fdir, safe + '_')   # -> <nama>_0001.png
     mark('CAM_START', name=name, i=i)
 
 

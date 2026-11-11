@@ -62,6 +62,22 @@ def safe_name(name, fallback='render'):
     return (s or fallback)[:80]
 
 
+def output_names(j):
+    """Nama file hasil: <nama file blender>_<nama kamera di Blender>_<waktu mulai render YYYYMMDD-HHMM>.
+    Nama kamera dipakai apa adanya; hanya karakter terlarang Windows (| : / dll.) yang jadi '_'."""
+    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M')
+    title = safe_name(j.get('title') or 'render')
+    names, used = {}, set()
+    for c in j['cameras']:
+        base, k = '%s_%s_%s' % (title, safe_name(c, 'camera'), stamp), 2
+        nm = base
+        while nm.lower() in used:
+            nm, k = '%s_%d' % (base, k), k + 1
+        used.add(nm.lower())
+        names[c] = nm
+    return names
+
+
 SERVER_HOST = '192.168.110.152'   # IP statis LAN; dipakai untuk alamat folder share (lebih andal dari nama PC)
 
 
@@ -300,6 +316,7 @@ def run_job(j):
     with lock:
         j['status'] = 'running'
         j['started'] = now_iso()
+        j['cam_files'] = output_names(j)
         j['progress'] = new_progress(j)
         j['progress']['phase'] = 'membuka file'
         j['progress']['unit_started'] = time.time()
@@ -412,7 +429,7 @@ def run_job(j):
             if complete and j.get('video') and frames and ext in ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.webp'):
                 mp4 = os.path.join(j['out_dir'], safe + '.mp4')
                 subprocess.run([FFMPEG, '-v', 'error', '-y', '-framerate', str(j['fps']),
-                                '-start_number', str(j['frame_start']), '-i', os.path.join(fdir, '%04d' + ext),
+                                '-start_number', str(j['frame_start']), '-i', os.path.join(fdir, safe + '_%04d' + ext),
                                 '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18',
                                 '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2', mp4],
                                timeout=7200, creationflags=NO_WINDOW,
